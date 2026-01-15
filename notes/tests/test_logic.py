@@ -1,6 +1,8 @@
-from django.test import TestCase, Client
-from django.urls import reverse
+from http import HTTPStatus
+
 from django.contrib.auth import get_user_model
+from django.test import Client, TestCase
+from django.urls import reverse
 import pytils.translit
 
 from notes.models import Note
@@ -8,211 +10,142 @@ from notes.models import Note
 User = get_user_model()
 
 
-class TestLogic(TestCase):
-    """Тесты бизнес-логики приложения."""
+class TestCommentCreation(TestCase):
 
     @classmethod
     def setUpTestData(cls):
-        """Создание тестовых данных."""
-        cls.author = User.objects.create_user(
-            username='author_user',
-            password='author_password'
-        )
-        cls.other_user = User.objects.create_user(
-            username='other_user',
-            password='other_password'
-        )
-
-        cls.note_data = {
-            'title': 'Тестовая заметка',
-            'text': 'Текст тестовой заметки',
-            'slug': 'test-note',
-        }
-
-        cls.existing_note = Note.objects.create(
-            **cls.note_data,
+        cls.author = User.objects.create(username='Автор заметки')
+        cls.reader = User.objects.create(username='Другой пользователь')
+        cls.note = Note.objects.create(
+            title='Заголовок',
+            text='Текст заметки',
+            slug='note-slug',
             author=cls.author
         )
+        cls.add_url = reverse('notes:add')
+        cls.success_url = reverse('notes:success')
+        cls.author_client = Client()
+        cls.author_client.force_login(cls.author)
+        cls.reader_client = Client()
+        cls.reader_client.force_login(cls.reader)
 
-    def setUp(self):
-        """Настройка клиентов для тестов."""
-        self.author_client = Client()
-        self.author_client.force_login(self.author)
-        self.other_client = Client()
-        self.other_client.force_login(self.other_user)
-        self.anonymous_client = Client()
-
-    def test_authenticated_user_can_create_note(self):
-        """
-        Залогиненный пользователь может создать заметку.
-        """
-        notes_count_before = Note.objects.count()
-
-        new_note_data = {
-            'title': 'Новая заметка',
-            'text': 'Текст новой заметки',
-            'slug': 'new-note',
+    def test_author_can_create_note(self):
+        """Залогиненный пользователь может создать заметку."""
+        notes_count = Note.objects.count()
+        form_data = {
+            'title': 'Новый заголовок',
+            'text': 'Новый текст',
+            'slug': 'new-slug',
         }
+        response = self.author_client.post(self.add_url, data=form_data)
+        self.assertRedirects(response, self.success_url)
+        self.assertEqual(Note.objects.count(), notes_count + 1)
+        new_note = Note.objects.get(slug='new-slug')
+        self.assertEqual(new_note.title, form_data['title'])
+        self.assertEqual(new_note.text, form_data['text'])
+        self.assertEqual(new_note.author, self.author)
 
-        url = reverse('notes:add')
-        response = self.author_client.post(url, data=new_note_data)
-
-        self.assertRedirects(response, reverse('notes:success'))
-
-        notes_count_after = Note.objects.count()
-        self.assertEqual(notes_count_after, notes_count_before + 1)
-
-        self.assertTrue(
-            Note.objects.filter(slug='new-note').exists()
-        )
-
-    def test_anonymous_user_cannot_create_note(self):
-        """
-        Анонимный пользователь не может создать заметку.
-        """
-        notes_count_before = Note.objects.count()
-
-        new_note_data = {
-            'title': 'Новая заметка',
-            'text': 'Текст новой заметки',
-            'slug': 'new-note',
+    def test_anonymous_user_cant_create_note(self):
+        """Анонимный пользователь не может создать заметку."""
+        notes_count = Note.objects.count()
+        form_data = {
+            'title': 'Новый заголовок',
+            'text': 'Новый текст',
+            'slug': 'new-slug',
         }
-
-        url = reverse('notes:add')
-        response = self.anonymous_client.post(url, data=new_note_data)
-
+        response = self.client.post(self.add_url, data=form_data)
         login_url = reverse('users:login')
-        self.assertRedirects(
-            response,
-            f'{login_url}?next={url}'
-        )
+        redirect_url = f'{login_url}?next={self.add_url}'
+        self.assertRedirects(response, redirect_url)
+        self.assertEqual(Note.objects.count(), notes_count)
 
-        notes_count_after = Note.objects.count()
-        self.assertEqual(notes_count_after, notes_count_before)
-
-    def test_cannot_create_duplicate_slug(self):
-        """
-        Невозможно создать две заметки с одинаковым slug.
-        """
-        notes_count_before = Note.objects.count()
-
-        duplicate_note_data = {
-            'title': 'Другая заметка',
-            'text': 'Текст другой заметки',
-            'slug': 'test-note',
+    def test_not_unique_slug(self):
+        """Невозможно создать две заметки с одинаковым slug."""
+        notes_count = Note.objects.count()
+        form_data = {
+            'title': 'Другой заголовок',
+            'text': 'Другой текст',
+            'slug': self.note.slug,
         }
-
-        url = reverse('notes:add')
-
-        response = self.author_client.post(url, data=duplicate_note_data)
-
-        self.assertEqual(response.status_code, 200)
-
+        response = self.author_client.post(self.add_url, data=form_data)
+        self.assertEqual(response.status_code, HTTPStatus.OK)
+        self.assertEqual(Note.objects.count(), notes_count)
         self.assertIn('form', response.context)
         form = response.context['form']
         self.assertFalse(form.is_valid())
         self.assertIn('slug', form.errors)
+        error_message = form.errors['slug'][0]
+        self.assertIn(self.note.slug, error_message)
 
-        notes_count_after = Note.objects.count()
-        self.assertEqual(notes_count_after, notes_count_before)
-
-    def test_auto_generate_slug_if_empty(self):
-        """
-        Если при создании заметки не заполнен slug,
-        то он формируется автоматически.
-        """
-        note_without_slug = {
-            'title': 'Заметка без slug',
-            'text': 'Текст заметки без slug',
+    def test_empty_slug(self):
+        """Если slug не заполнен, он формируется автоматически."""
+        notes_count = Note.objects.count()
+        form_data = {
+            'title': 'Новый заголовок',
+            'text': 'Новый текст',
+            'slug': '',
         }
+        response = self.author_client.post(self.add_url, data=form_data)
+        self.assertRedirects(response, self.success_url)
+        self.assertEqual(Note.objects.count(), notes_count + 1)
+        new_note = Note.objects.get(title='Новый заголовок')
+        expected_slug = pytils.translit.slugify(form_data['title'])
+        self.assertEqual(new_note.slug, expected_slug)
 
-        url = reverse('notes:add')
-        response = self.author_client.post(url, data=note_without_slug)
 
-        self.assertRedirects(response, reverse('notes:success'))
+class TestNoteEditDelete(TestCase):
 
-        created_note = Note.objects.filter(
-            title='Заметка без slug',
-            author=self.author
-        ).first()
-
-        self.assertIsNotNone(created_note)
-        self.assertIsNotNone(created_note.slug)
-        self.assertNotEqual(created_note.slug, '')
-
-        expected_slug = pytils.translit.slugify('Заметка без slug')
-        self.assertEqual(created_note.slug, expected_slug)
-
-    def test_user_can_edit_own_note(self):
-        """
-        Пользователь может редактировать свои заметки.
-        """
-        updated_data = {
+    @classmethod
+    def setUpTestData(cls):
+        cls.author = User.objects.create(username='Автор заметки')
+        cls.reader = User.objects.create(username='Другой пользователь')
+        cls.note = Note.objects.create(
+            title='Заголовок',
+            text='Текст заметки',
+            slug='note-slug',
+            author=cls.author
+        )
+        cls.edit_url = reverse('notes:edit', args=(cls.note.slug,))
+        cls.delete_url = reverse('notes:delete', args=(cls.note.slug,))
+        cls.success_url = reverse('notes:success')
+        cls.author_client = Client()
+        cls.author_client.force_login(cls.author)
+        cls.reader_client = Client()
+        cls.reader_client.force_login(cls.reader)
+        cls.form_data = {
             'title': 'Обновленный заголовок',
             'text': 'Обновленный текст',
-            'slug': 'test-note',
+            'slug': 'updated-slug',
         }
 
-        url = reverse('notes:edit', kwargs={'slug': self.existing_note.slug})
-        response = self.author_client.post(url, data=updated_data)
+    def test_author_can_edit_note(self):
+        """Пользователь может редактировать свои заметки."""
+        response = self.author_client.post(self.edit_url, data=self.form_data)
+        self.assertRedirects(response, self.success_url)
+        self.note.refresh_from_db()
+        self.assertEqual(self.note.title, self.form_data['title'])
+        self.assertEqual(self.note.text, self.form_data['text'])
+        self.assertEqual(self.note.slug, self.form_data['slug'])
 
-        self.assertRedirects(response, reverse('notes:success'))
+    def test_other_user_cant_edit_note(self):
+        """Пользователь не может редактировать чужие заметки."""
+        response = self.reader_client.post(self.edit_url, data=self.form_data)
+        self.assertEqual(response.status_code, HTTPStatus.NOT_FOUND)
+        self.note.refresh_from_db()
+        self.assertEqual(self.note.title, 'Заголовок')
+        self.assertEqual(self.note.text, 'Текст заметки')
+        self.assertEqual(self.note.slug, 'note-slug')
 
-        self.existing_note.refresh_from_db()
+    def test_author_can_delete_note(self):
+        """Пользователь может удалять свои заметки."""
+        notes_count = Note.objects.count()
+        response = self.author_client.post(self.delete_url)
+        self.assertRedirects(response, self.success_url)
+        self.assertEqual(Note.objects.count(), notes_count - 1)
 
-        self.assertEqual(self.existing_note.title, 'Обновленный заголовок')
-        self.assertEqual(self.existing_note.text, 'Обновленный текст')
-
-    def test_user_cannot_edit_other_users_note(self):
-        """
-        Пользователь не может редактировать чужие заметки.
-        """
-        updated_data = {
-            'title': 'Попытка изменить чужую',
-            'text': 'Текст чужой заметки',
-            'slug': 'test-note',
-        }
-
-        url = reverse('notes:edit', kwargs={'slug': self.existing_note.slug})
-        response = self.other_client.post(url, data=updated_data)
-
-        self.assertEqual(response.status_code, 404)
-
-        self.existing_note.refresh_from_db()
-        self.assertEqual(self.existing_note.title, 'Тестовая заметка')
-        self.assertEqual(self.existing_note.text, 'Текст тестовой заметки')
-
-    def test_user_can_delete_own_note(self):
-        """
-        Пользователь может удалять свои заметки.
-        """
-        notes_count_before = Note.objects.count()
-
-        url = reverse('notes:delete', kwargs={'slug': self.existing_note.slug})
-        response = self.author_client.post(url)
-
-        self.assertRedirects(response, reverse('notes:success'))
-
-        notes_count_after = Note.objects.count()
-        self.assertEqual(notes_count_after, notes_count_before - 1)
-
-        with self.assertRaises(Note.DoesNotExist):
-            Note.objects.get(slug='test-note', author=self.author)
-
-    def test_user_cannot_delete_other_users_note(self):
-        """
-        Пользователь не может удалять чужие заметки.
-        """
-        notes_count_before = Note.objects.count()
-
-        url = reverse('notes:delete', kwargs={'slug': self.existing_note.slug})
-        response = self.other_client.post(url)
-
-        self.assertEqual(response.status_code, 404)
-
-        notes_count_after = Note.objects.count()
-        self.assertEqual(notes_count_after, notes_count_before)
-
-        self.assertTrue(
-            Note.objects.filter(slug='test-note').exists()
-        )
+    def test_other_user_cant_delete_note(self):
+        """Пользователь не может удалять чужие заметки."""
+        notes_count = Note.objects.count()
+        response = self.reader_client.post(self.delete_url)
+        self.assertEqual(response.status_code, HTTPStatus.NOT_FOUND)
+        self.assertEqual(Note.objects.count(), notes_count)
